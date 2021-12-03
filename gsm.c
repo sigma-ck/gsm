@@ -1,8 +1,9 @@
 
-#include <stm32f2xx_ll_usart.h>
+//#include <stm32f2xx_ll_usart.h>
 #include <pwr_power.h>
 #include "gsm.h"
 #include "stdio.h"
+#include <drivers/uart.h>
 
 //#############################################################################################
 //osThreadId gsmTaskHandle;
@@ -14,7 +15,7 @@ struct k_mutex gsmMutex;
 #if (_GSM_DTMF_DETECT_ENABLE == 1)
 osMessageQId gsmDtmfQueueHandle;
 #endif
-Gsm_t gsm;
+Gsm_t gsm = { .uart_dev = NULL };
 
 K_HEAP_DEFINE(gsm_heap, 2048);
 
@@ -32,6 +33,66 @@ const char *_GSM_ALWAYS_SEARCH[] = {
 //#############################################################################################
 void gsm_init_config(void);
 //#############################################################################################
+
+static void gsm_uart_isr(const struct device *dev, void *user_data)
+{
+	(void)dev;
+	//struct lwgsm_ll_uart_t *gsm_uart = (struct lwgsm_ll_uart_t *)user_data;
+	//const struct device *uart_dev = gsm_uart->uart_dev;
+	const struct device *uart_dev = gsm.uart_dev;
+	int rx, ret;
+	uint8_t tmp;
+
+	/* get all the data off UART as fast as we can */
+	while (uart_irq_update(uart_dev) && uart_irq_is_pending(uart_dev)) {
+		if (uart_irq_rx_ready(uart_dev)) {
+			// rx isr
+			rx = uart_fifo_read(uart_dev, &tmp, sizeof(tmp));
+			if (rx > 0) {
+				if (gsm.at.index < _GSM_RXSIZE - 1) {
+					gsm.at.buff[gsm.at.index] = tmp;
+					gsm.at.index++;
+				}
+				gsm.at.rxTime = sys_clock_timeout_end_calc(K_MSEC(_GSM_RXTIMEOUT));
+			}
+		}
+		if (uart_irq_tx_ready(uart_dev)) {
+			// tx isr
+			uint8_t buffer;
+			//int rb_len;
+			int send_len;
+
+			if (gsm.tx.count == gsm.tx.sent) {
+				uart_irq_tx_disable(uart_dev);
+				k_sem_give(&gsm.tx.sem);
+			} else {
+				buffer = *(gsm.tx.buffer + gsm.tx.sent);
+				send_len = uart_fifo_fill(uart_dev, &buffer, 1);
+				if (send_len != 1) {
+					//LOG_ERR("Drop 1 bytes");
+				}
+				gsm.tx.sent++;
+			}
+			/*
+			rb_len = ring_buf_get(&gsm_uart->tx_rb, &buffer,
+					      sizeof(buffer));
+			if (!rb_len) {
+				LOG_DBG("Ring buffer empty, disable TX IRQ");
+				uart_irq_tx_disable(uart_dev);
+			} else {
+				send_len = uart_fifo_fill(uart_dev, &buffer,
+							  rb_len);
+				if (send_len < rb_len) {
+					LOG_ERR("Drop %d bytes",
+						rb_len - send_len);
+				}
+				LOG_DBG("ringbuf -> tty fifo %d bytes",
+					send_len);
+			}*/
+		}
+	}
+}
+/*
 void gsm_at_rxCallback(void)
 {
 	if (LL_USART_IsActiveFlag_RXNE(_GSM_USART)) {
@@ -40,17 +101,20 @@ void gsm_at_rxCallback(void)
 			gsm.at.buff[gsm.at.index] = tmp;
 			gsm.at.index++;
 		}
-		gsm.at.rxTime = HAL_GetTick();
+		//gsm.at.rxTime = HAL_GetTick();
+		gsm.at.rxTime = sys_clock_timeout_end_calc(K_MSEC(_GSM_RXTIMEOUT));
 	}
 }
+ */
 //#############################################################################################
 void gsm_at_checkRxBuffer(void)
 {
-	if ((gsm.at.index > 0) && (HAL_GetTick() - gsm.at.rxTime >= _GSM_RXTIMEOUT)) {
+	//if ((gsm.at.index > 0) && (HAL_GetTick() - gsm.at.rxTime >= _GSM_RXTIMEOUT)) {
+	if ((gsm.at.index > 0) && (gsm.at.rxTime < k_uptime_ticks())) {
 #if _GSM_DEBUG == 1
 		printf("%s", (const char *)gsm.at.buff);
 #endif
-		//  +++ search answer atcommand
+		//  +++ search answer at-command
 		for (uint8_t i = 0; i < _GSM_AT_MAX_ANSWER_ITEMS; i++) {
 			if (gsm.at.answerSearch[i] != NULL) {
 				char *found = strstr((char *)gsm.at.buff, gsm.at.answerSearch[i]);
@@ -64,7 +128,7 @@ void gsm_at_checkRxBuffer(void)
 			} else
 				break;
 		}
-		//  --- search answer atcommand
+		//  --- search answer at-command
 
 		//  +++ search always
 		for (uint8_t i = 0; i < sizeof(_GSM_ALWAYS_SEARCH) / 4; i++) {
@@ -132,24 +196,35 @@ void gsm_at_checkRxBuffer(void)
 //#############################################################################################
 void gsm_at_sendString(const char *string)
 {
-	for (size_t i = 0; i < strlen(string); i++) {
+	gsm_at_sendData(string, strlen(string));
+
+	/*for (size_t i = 0; i < strlen(string); i++) {
 		while (!LL_USART_IsActiveFlag_TXE(_GSM_USART))
 			k_sleep(K_MSEC(1));
 		LL_USART_TransmitData8(_GSM_USART, string[i]);
 	}
 	while (!LL_USART_IsActiveFlag_TC(_GSM_USART))
-		k_sleep(K_MSEC(1));
+		k_sleep(K_MSEC(1));*/
 }
 //#############################################################################################
 void gsm_at_sendData(const uint8_t *data, uint16_t len)
 {
-	for (uint16_t i = 0; i < len; i++) {
+	gsm.tx.count = len;
+	gsm.tx.buffer = data;
+	gsm.tx.sent = 0;
+	uart_irq_tx_enable(gsm.uart_dev);
+	// wait send
+	//k_sem_give(&gsm.tx.sem);
+	k_sem_take(&gsm.tx.sem, K_FOREVER);
+	// ToDo: Написать выход через таймаут если не пришел почему-то семафор
+
+	/*for (uint16_t i = 0; i < len; i++) {
 		while (!LL_USART_IsActiveFlag_TXE(_GSM_USART))
 			k_sleep(K_MSEC(1));
 		LL_USART_TransmitData8(_GSM_USART, data[i]);
 	}
 	while (!LL_USART_IsActiveFlag_TC(_GSM_USART))
-		k_sleep(K_MSEC(1));
+		k_sleep(K_MSEC(1));*/
 }
 //#############################################################################################
 uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
@@ -175,11 +250,14 @@ uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
 		memset(gsm.at.answerString, 0, sizeOfAnswer);
 	}
 	gsm.at.answerFound = -1;
-	uint32_t startTime = HAL_GetTick();
+	//uint32_t startTime = HAL_GetTick();
+
+	uint64_t startInterval = sys_clock_timeout_end_calc(K_MSEC(waitMs));
 
 	gsm_at_sendString(command);
 
-	while (HAL_GetTick() - startTime < waitMs) {
+	//while (HAL_GetTick() - startTime < waitMs) {
+	while (startInterval > k_uptime_ticks()) {
 		if (gsm.at.answerFound != -1)
 			break;
 		k_sleep(K_MSEC(10));
@@ -208,6 +286,8 @@ bool gsm_power(bool on_off)
 {
 	if (on_off) //  power on
 	{
+
+		pwr_hw_gsm_power_on();
 		if (gsm_at_sendCommand("AT\r\n", 500, NULL, 0, 2, "\r\nOK\r\n", "\r\nERROR\r\n") ==
 		    1) {
 			gsm.power = 1;
@@ -355,6 +435,7 @@ uint8_t gsm_getSignalQuality_0_to_100(void)
 	return gsm.signal;
 }
 //#############################################################################################
+#if CONFIG_GSM_MODULE_LIB_ENABLE_USSD
 bool gsm_ussd(char *command, char *answer, uint16_t sizeOfAnswer, uint8_t waitSecond)
 {
 	if (command == NULL) {
@@ -389,11 +470,14 @@ bool gsm_ussd(char *command, char *answer, uint16_t sizeOfAnswer, uint8_t waitSe
 			return false;
 	}
 }
+#endif
 //#############################################################################################
 bool gsm_waitForStarted(uint8_t waitSecond)
 {
-	uint32_t startTime = HAL_GetTick();
-	while (HAL_GetTick() - startTime < (waitSecond * 1000)) {
+	uint64_t startInterval = sys_clock_timeout_end_calc(K_SECONDS(waitSecond));
+	//uint32_t startTime = HAL_GetTick();
+	//while (HAL_GetTick() - startTime < (waitSecond * 1000)) {
+	while (startInterval > k_uptime_ticks()) {
 		k_sleep(K_MSEC(100));
 		if (gsm.started == 1)
 			return true;
@@ -403,9 +487,11 @@ bool gsm_waitForStarted(uint8_t waitSecond)
 //#############################################################################################
 bool gsm_waitForRegister(uint8_t waitSecond)
 {
-	uint32_t startTime = HAL_GetTick();
+	uint64_t startInterval = sys_clock_timeout_end_calc(K_SECONDS(waitSecond));
+	//uint32_t startTime = HAL_GetTick();
 	uint8_t idx = 0;
-	while (HAL_GetTick() - startTime < (waitSecond * 1000)) {
+	//while (HAL_GetTick() - startTime < (waitSecond * 1000)) {
+	while (startInterval > k_uptime_ticks()) {
 		k_sleep(K_MSEC(100));
 		if (gsm.registred == 1)
 			return true;
@@ -425,7 +511,7 @@ bool gsm_tonePlay(Gsm_Tone_t Gsm_Tone_, uint32_t durationMiliSecond, uint8_t lev
 	sprintf(str, "AT+SNDLEVEL=0,%d\r\n", level_0_100);
 	if (gsm_at_sendCommand(str, 5000, NULL, 0, 2, "\r\nOK\r\n", "\r\nERROR\r\n") != 1)
 		return false;
-	sprintf(str, "AT+STTONE=1,%d,%d\r\n", Gsm_Tone_, durationMiliSecond);
+	sprintf(str, "AT+STTONE=1,%d,%d\r\n", Gsm_Tone_, (unsigned)durationMiliSecond);
 	if (gsm_at_sendCommand(str, 5000, NULL, 0, 2, "\r\nOK\r\n", "\r\nERROR\r\n") != 1)
 		return false;
 	return true;
@@ -442,7 +528,7 @@ bool gsm_toneStop(void)
 bool gsm_dtmf(char *string, uint32_t durationMiliSecond)
 {
 	char str[32];
-	sprintf(str, "AT+VTS=\"%s\",%d\r\n", string, durationMiliSecond / 100);
+	sprintf(str, "AT+VTS=\"%s\",%d\r\n", string, (unsigned)durationMiliSecond / 100);
 	if (gsm_at_sendCommand(str, 5000, NULL, 0, 2, "\r\nOK\r\n", "\r\nERROR\r\n") != 1)
 		return false;
 	return true;
@@ -501,12 +587,16 @@ void gsm_init_config(void)
 //#############################################################################################
 void FUNC_NORETURN gsm_task(void *arg1, void *arg2, void *arg3)
 {
-	static uint32_t gsm10sTimer = 0;
-	static uint32_t gsm60sTimer = 0;
+	//static uint32_t gsm10sTimer = 0;
+	//static uint32_t gsm60sTimer = 0;
+	static uint64_t gsm10sTimer = 0;
+	static uint64_t gsm60sTimer = 0;
 	static uint8_t gsmError = 0;
 	char str[32];
-	while (HAL_GetTick() < 2000)
-		k_sleep(K_MSEC(100));
+
+	/*while (HAL_GetTick() < 2000)
+		k_sleep(K_MSEC(100));*/
+
 	gsm_power(true);
 #if (_GSM_MSG_ENABLE == 1)
 	if (gsm.msg.storageUsed > 0) {
@@ -558,9 +648,11 @@ void FUNC_NORETURN gsm_task(void *arg1, void *arg2, void *arg3)
 				gsm.taskBusy = 0;
 			}
 #endif
-			if (HAL_GetTick() - gsm10sTimer >= 10000) //  10 seconds timer
+			if (gsm10sTimer < k_uptime_ticks()) //  10 seconds timer
+			//if (HAL_GetTick() - gsm10sTimer >= 10000) //  10 seconds timer
 			{
-				gsm10sTimer = HAL_GetTick();
+				//gsm10sTimer = HAL_GetTick();
+				gsm10sTimer = sys_clock_timeout_end_calc(K_SECONDS(10));
 				gsm.taskBusy = 1;
 				if ((gsm_getSignalQuality_0_to_100() < 20) ||
 				    (gsm.registred == 0)) //  update signal value every 10 seconds
@@ -605,9 +697,12 @@ void FUNC_NORETURN gsm_task(void *arg1, void *arg2, void *arg3)
 				gsm.taskBusy = 0;
 #endif
 			}
-			if (HAL_GetTick() - gsm60sTimer >= 60000) //  60 seconds timer
+
+			if (gsm60sTimer < k_uptime_ticks()) //  60 seconds timer
+			//if (HAL_GetTick() - gsm60sTimer >= 60000) //  60 seconds timer
 			{
-				gsm60sTimer = HAL_GetTick();
+				//gsm60sTimer = HAL_GetTick();
+				gsm60sTimer = sys_clock_timeout_end_calc(K_SECONDS(60));
 #if (_GSM_MSG_ENABLE == 1)
 				gsm.taskBusy = 1;
 				//  check sms memory every 60 seconds
@@ -646,7 +741,9 @@ void FUNC_NORETURN gsm_task(void *arg1, void *arg2, void *arg3)
 #endif
 		} else {
 			gsm.taskBusy = 1;
-			gsm_power(true); //  turn on again, after power down
+			if (gsm.enabled) {
+				gsm_power(true); //  turn on again, after power down
+			}
 			gsm.taskBusy = 0;
 		}
 		k_sleep(K_MSEC(10));
@@ -664,7 +761,8 @@ k_tid_t gsm_buffer_th_tid;
 //#############################################################################################
 void FUNC_NORETURN gsmBuffer_task(void *arg1, void *arg2, void *arg3)
 {
-	LL_USART_EnableIT_RXNE(_GSM_USART);
+	uart_irq_rx_enable(gsm.uart_dev);
+	//LL_USART_EnableIT_RXNE(_GSM_USART);
 	while (1) {
 		gsm_at_checkRxBuffer();
 		k_sleep(K_MSEC(1));
@@ -676,45 +774,56 @@ bool gsm_init(void)
 	if (gsm.inited == 1)
 		return true;
 	gsm.inited = 1;
-	//HAL_GPIO_WritePin(_GSM_POWERKEY_GPIO, _GSM_POWERKEY_PIN, GPIO_PIN_SET);
-	pwr_hw_gsm_power_off();
+	gsm.enabled = 0;
 
-	do {
-		//osMutexDef(gsmMutex);
-		//gsmMutexID = osMutexCreate(osMutex(gsmMutex));
+	gsm.uart_dev = device_get_binding(DT_LABEL(DT_BUS(DT_NODELABEL(gsm_at))));
+	if (!gsm.uart_dev) {
+		//LOG_ERR("SIMCOM GSM device not found");
+		gsm.inited = 0;
+		return false;
+	}
 
-		k_mutex_init(&gsmMutex);
+	k_sem_init(&gsm.tx.sem, 0, 1);
+	k_mutex_init(&gsmMutex);
 
-		//osThreadDef(gsmTask, gsm_task, osPriority_, 0, _GSM_TASKSIZE);
-		//gsmTaskHandle = osThreadCreate(osThread(gsmTask), NULL);
+	uart_irq_rx_disable(gsm.uart_dev);
+	uart_irq_tx_disable(gsm.uart_dev);
+	uart_irq_callback_user_data_set(gsm.uart_dev, gsm_uart_isr, &gsm);
 
-		gsm_main_th_tid =
-			k_thread_create(&gsm_main_th, gsm_main_stack_area,
-					K_THREAD_STACK_SIZEOF(gsm_main_stack_area), gsm_task, NULL,
-					NULL, NULL, CONFIG_GSM_MODULE_LIB_MAIN_TH_PRIORITY, 0,
-					K_NO_WAIT);
-		k_thread_name_set(&gsm_main_th, "gsm_main");
 
-		gsm_buffer_th_tid =
-			k_thread_create(&gsm_buffer_th, gsm_buffer_stack_area,
-					K_THREAD_STACK_SIZEOF(gsm_buffer_stack_area),
-					gsmBuffer_task, NULL, NULL, NULL,
-					CONFIG_GSM_MODULE_LIB_BUFFER_TH_PRIORITY, 0, K_NO_WAIT);
-		k_thread_name_set(&gsm_buffer_th, "gsm_buffer");
 
-		//osThreadDef(gsmBufferTask, gsmBuffer_task, osPriority_, 0, _GSM_BUFFTASKSIZE);
-		//gsmBufferTaskHandle = osThreadCreate(osThread(gsmBufferTask), NULL);
 
-		//if ((gsmTaskHandle == NULL) || (gsmBufferTaskHandle == NULL) ||
-		//    (gsmMutexID == NULL))
-		//	break;
+
+
+	gsm_main_th_tid =
+		k_thread_create(&gsm_main_th, gsm_main_stack_area,
+				K_THREAD_STACK_SIZEOF(gsm_main_stack_area), gsm_task, NULL, NULL,
+				NULL, CONFIG_GSM_MODULE_LIB_MAIN_TH_PRIORITY, 0, K_NO_WAIT);
+	k_thread_name_set(&gsm_main_th, "gsm_main");
+
+	gsm_buffer_th_tid =
+		k_thread_create(&gsm_buffer_th, gsm_buffer_stack_area,
+				K_THREAD_STACK_SIZEOF(gsm_buffer_stack_area), gsmBuffer_task, NULL,
+				NULL, NULL, CONFIG_GSM_MODULE_LIB_BUFFER_TH_PRIORITY, 0, K_NO_WAIT);
+	k_thread_name_set(&gsm_buffer_th, "gsm_buffer");
+
+	//osThreadDef(gsmBufferTask, gsmBuffer_task, osPriority_, 0, _GSM_BUFFTASKSIZE);
+	//gsmBufferTaskHandle = osThreadCreate(osThread(gsmBufferTask), NULL);
+
+	//if ((gsmTaskHandle == NULL) || (gsmBufferTaskHandle == NULL) ||
+	//    (gsmMutexID == NULL))
+	//	break;
 #if (_GSM_DTMF_DETECT_ENABLE == 1)
-		osMessageQDef(GsmDtmfQueue, 8, uint8_t);
-		gsmDtmfQueueHandle = osMessageCreate(osMessageQ(GsmDtmfQueue), NULL);
-		if (gsmDtmfQueueHandle == NULL)
-			break;
+	osMessageQDef(GsmDtmfQueue, 8, uint8_t);
+	gsmDtmfQueueHandle = osMessageCreate(osMessageQ(GsmDtmfQueue), NULL);
+	if (gsmDtmfQueueHandle == NULL)
+		break;
 #endif
-		return true;
-	} while (0);
-	return false;
+
+	return true;
+}
+
+bool gsm_enable(bool enable) {
+	gsm.enabled = enable;
+	return enable;
 }

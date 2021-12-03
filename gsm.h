@@ -131,7 +131,8 @@ typedef enum {
 } Gsm_Ftp_Error_t;
 
 typedef struct {
-	uint32_t rxTime;
+	//uint32_t rxTime;
+	uint64_t rxTime;
 	uint16_t index;
 	uint8_t buff[_GSM_RXSIZE];
 	int8_t answerFound;
@@ -182,6 +183,7 @@ typedef struct {
 
 typedef struct {
 	uint8_t inited;
+	uint8_t enabled;
 	uint8_t power;
 	uint8_t started;
 	uint8_t registred;
@@ -197,8 +199,49 @@ typedef struct {
 #if (_GSM_GPRS_ENABLE == 1)
 	Gsm_Gprs_t gprs;
 #endif
+	struct {
+		const char *buffer;
+		uint32_t count;
+		uint32_t sent;
+		/* tx semaphore */
+		struct k_sem sem;
+	} tx;
+
+	/* UART device */
+	const struct device *uart_dev;
+
+	struct {
+#if CONFIG_GSM_MODULE_LIB_PIN_POWER_ENABLE
+		void (* hw_pin_power_press)(void);
+		void (* hw_pin_power_release)(void);
+#endif
+#if CONFIG_GSM_MODULE_LIB_PIN_RESET_ENABLE
+		void (* hw_pin_reset_press)(void);
+		void (* hw_pin_reset_release)(void);
+#endif
+#if CONFIG_GSM_MODULE_LIB_PIN_ENABLE_ENABLE
+		void (* hw_pin_enable_press)(void);
+		int (* hw_pin_enable_release)(void);
+#endif
+#if CONFIG_GSM_MODULE_LIB_PIN_SIM_SELECT_ENABLE
+		void (* hw_pin_sim_select_press)(void);
+		void (* hw_pin_sim_select_release)(void);
+#endif
+#if CONFIG_GSM_MODULE_LIB_PIN_SPEAKER_ON_ENABLE
+		void (* hw_pin_spk_on_press)(void);
+		void (* hw_pin_spk_on_release)(void);
+#endif
+	} hw_pins;
 
 } Gsm_t;
+
+typedef enum {
+	pin_power,
+	pin_reset,
+	pin_enable,
+	pin_sim_select,
+	pin_spk_enable,
+} hw_pins_t;
 
 //###################################################################
 //extern osThreadId gsmTaskHandle;
@@ -206,13 +249,14 @@ extern k_tid_t gsm_main_th_tid;
 
 extern Gsm_t gsm;
 //###################################################################   at commands
-void gsm_at_rxCallback(void);
+//void gsm_at_rxCallback(void);
 void gsm_at_sendString(const char *string);
 void gsm_at_sendData(const uint8_t *data, uint16_t len);
 uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
 			   uint16_t sizeOfAnswer, uint8_t items, ...);
 //###################################################################   general functions
 bool gsm_init(void);
+bool gsm_enable(bool enable);
 bool gsm_power(bool on_off);
 bool gsm_setDefault(void);
 bool gsm_saveProfile(void);
@@ -224,7 +268,9 @@ bool gsm_getVersion(char *string, uint8_t sizeOfString);
 bool gsm_getModel(char *string, uint8_t sizeOfString);
 bool gsm_getServiceProviderName(char *string, uint8_t sizeOfString);
 uint8_t gsm_getSignalQuality_0_to_100(void);
+#if CONFIG_GSM_MODULE_LIB_ENABLE_USSD
 bool gsm_ussd(char *command, char *answer, uint16_t sizeOfAnswer, uint8_t waitSecond);
+#endif
 bool gsm_tonePlay(Gsm_Tone_t Gsm_Tone_, uint32_t durationMiliSecond, uint8_t level_0_100);
 bool gsm_toneStop(void);
 bool gsm_dtmf(char *string, uint32_t durationMiliSecond);
@@ -296,5 +342,6 @@ void gsm_callback_gprsDisconnected(void);
 void gsm_callback_gprsConnected(void);
 void gsm_callback_gprsGotData(uint8_t *data, uint16_t len);
 //###################################################################
+void gsm_set_cb_hw_key(hw_pins_t type, bool press, void * func);
 
 #endif
