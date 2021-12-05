@@ -343,5 +343,6 @@ void gsm_callback_gprsConnected(void);
 void gsm_callback_gprsGotData(uint8_t *data, uint16_t len);
 //###################################################################
 void gsm_set_cb_hw_key(hw_pins_t type, bool press, void * func);
+void gsm_hw_pins_init(void);
 
 #endif
