@@ -186,6 +186,7 @@ typedef struct {
 	uint8_t enabled;
 	uint8_t power;
 	uint8_t started;
+	uint8_t process_started;
 	uint8_t registred;
 	uint8_t signal;
 	uint8_t taskBusy;

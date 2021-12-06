@@ -5,6 +5,7 @@
 
 //#############################################################################################
 struct k_mutex gsmMutex;
+struct k_mutex gsmPower;
 
 #if (_GSM_DTMF_DETECT_ENABLE == 1)
 osMessageQId gsmDtmfQueueHandle;
@@ -175,20 +176,32 @@ uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
 	do {
 		k_sleep(K_MSEC(10));
 	} while (k_mutex_lock(&gsmMutex, K_SECONDS(10)) != 0);
+
+	printk("\n------\n- Command: %s\n", command);
+
 	va_list tag;
 	va_start(tag, items);
 	for (uint8_t i = 0; i < items; i++) {
 		char *str = va_arg(tag, char *);
 		gsm.at.answerSearch[i] = k_heap_alloc(&gsm_heap, strlen(str)+1, K_MSEC(100));
-		if (gsm.at.answerSearch[i] != NULL)
+		if (gsm.at.answerSearch[i] != NULL) {
 			strcpy(gsm.at.answerSearch[i], str);
+			printk("alloc: item %i\n", strlen(str)+1);
+		} else {
+			printk("ERR alloc item %i\n", strlen(str)+1);
+		}
 	}
 	va_end(tag);
 
 	if ((answer != NULL) && (sizeOfAnswer > 0)) {
 		gsm.at.answerSize = sizeOfAnswer;
 		gsm.at.answerString = k_heap_alloc(&gsm_heap, sizeOfAnswer + 1, K_MSEC(100));
-		memset(gsm.at.answerString, 0, sizeOfAnswer);
+		if (gsm.at.answerString != NULL) {
+			printk("alloc: answer %i\n", sizeOfAnswer + 1);
+			memset(gsm.at.answerString, 0, sizeOfAnswer);
+		} else {
+			printk("ERR alloc answer %i\n", sizeOfAnswer + 1);
+		}
 	}
 
 	gsm.at.answerFound = -1;
@@ -203,17 +216,21 @@ uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
 	}
 
 	for (uint8_t i = 0; i < items; i++) {
-		k_heap_free(&gsm_heap, gsm.at.answerSearch[i]);
-		gsm.at.answerSearch[i] = NULL;
+		if (gsm.at.answerSearch[i] != NULL) {
+			k_heap_free(&gsm_heap, gsm.at.answerSearch[i]);
+			printk("free: item\n");
+			gsm.at.answerSearch[i] = NULL;
+		}
 	}
 
 	if ((answer != NULL) && (sizeOfAnswer > 0)) {
 		if (gsm.at.answerFound >= 0)
 			strncpy(answer, gsm.at.answerString, sizeOfAnswer);
 		k_heap_free(&gsm_heap, gsm.at.answerString);
+		printk("free: answer\n");
 		gsm.at.answerString = NULL;
+		printk("Answer \"%s\"\n", answer);
 	}
-
 	k_mutex_unlock(&gsmMutex);
 	return gsm.at.answerFound + 1;
 }
@@ -222,6 +239,9 @@ uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
 //#############################################################################################
 bool gsm_power(bool on_off)
 {
+	if (k_mutex_lock(&gsmPower, K_NO_WAIT) != 0)
+		return false;
+
 	if (on_off) {
 		//  power on
 #if CONFIG_GSM_MODULE_LIB_PIN_POWER_ENABLE
@@ -235,6 +255,7 @@ bool gsm_power(bool on_off)
 			gsm.power = 1;
 			gsm_init_config();
 			gsm.started = 1;
+			k_mutex_unlock(&gsmPower);
 			return true;
 		}
 #if CONFIG_GSM_MODULE_LIB_PIN_ENABLE_ENABLE
@@ -253,11 +274,13 @@ bool gsm_power(bool on_off)
 				k_sleep(K_MSEC(4000));
 				gsm_init_config();
 				gsm.started = 1;
+				k_mutex_unlock(&gsmPower);
 				return true;
 			}
 		}
 		gsm.power = 0;
 		gsm.started = 0;
+		k_mutex_unlock(&gsmPower);
 		return false;
 	} else {
 		//  power off
@@ -266,11 +289,13 @@ bool gsm_power(bool on_off)
 			gsm.hw_pins.hw_pin_power_release();
 		}
 		k_sleep(K_MSEC(500));
+		k_mutex_unlock(&gsmPower);
 		return true;
 #else
 		if (gsm_at_sendCommand("AT\r\n", 500, NULL, 0, 1, "\r\nOK\r\n") == 0) {
 			gsm.power = 0;
 			gsm.started = 0;
+			k_mutex_unlock(&gsmPower);
 			return true;
 		}
 #if CONFIG_GSM_MODULE_LIB_PIN_ENABLE_ENABLE
@@ -286,12 +311,15 @@ bool gsm_power(bool on_off)
 		if (gsm_at_sendCommand("AT\r\n", 500, NULL, 0, 1, "\r\nOK\r\n") == 0) {
 			gsm.power = 0;
 			gsm.started = 0;
+			k_mutex_unlock(&gsmPower);
 			return true;
 		} else {
 			gsm.power = 1;
+			k_mutex_unlock(&gsmPower);
 			return false;
 		}
 #endif
+		k_mutex_unlock(&gsmPower);
 	}
 }
 //#############################################################################################
@@ -339,12 +367,15 @@ bool gsm_getVersion(char *string, uint8_t sizeOfString)
 		return false;
 	char str1[16 + sizeOfString];
 	char str2[sizeOfString + 1];
-	if (gsm_at_sendCommand("AT+CGMR\r\n", 1000, str1, sizeof(str1), 2, "AT+GMM",
-			       "\r\nERROR\r\n") != 1)
+	if (gsm_at_sendCommand("AT+CGMR\r\n", 10000, str1, sizeof(str1), 2, "AT+GMM",
+			       "\r\nERROR\r\n") != 1) {
+
 		return false;
+	}
 	if (sscanf(str1, "\r\nAT+CGMR\r\n %[^\r\n]", str2) != 1)
 		return false;
 	strncpy(string, str2, sizeOfString);
+	printk("Version %s \n", string);
 	return true;
 }
 //#############################################################################################
@@ -380,7 +411,7 @@ bool gsm_getServiceProviderName(char *string, uint8_t sizeOfString)
 //#############################################################################################
 uint8_t gsm_getSignalQuality_0_to_100(void)
 {
-	return 12;
+	return 33;
 	char str[32];
 	uint8_t p1, p2;
 	if (gsm_at_sendCommand("AT+CSQ\r\n", 1000, str, sizeof(str), 2,
@@ -556,7 +587,7 @@ void FUNC_NORETURN gsm_task(void *arg1, void *arg2, void *arg3)
 	static uint8_t gsmError = 0;
 	char str[32];
 
-	gsm_power(true);
+	//gsm_power(true);
 #if (_GSM_MSG_ENABLE == 1)
 	if (gsm.msg.storageUsed > 0) {
 		for (uint16_t i = 0; i < 150; i++) {
@@ -569,7 +600,7 @@ void FUNC_NORETURN gsm_task(void *arg1, void *arg2, void *arg3)
 	}
 #endif
 	while (1) {
-		if (gsm.power == 1) {
+		if (gsm.power == 1 && gsm.started == 1) {
 #if (_GSM_DTMF_DETECT_ENABLE == 1)
 			osEvent event = osMessageGet(gsmDtmfQueueHandle, 0);
 			if (event.status == osEventMessage) {
@@ -609,6 +640,7 @@ void FUNC_NORETURN gsm_task(void *arg1, void *arg2, void *arg3)
 #endif
 			if (gsm10sTimer < k_uptime_ticks()) //  10 seconds timer
 			{
+				printk("Timer 10S");
 				gsm10sTimer = sys_clock_timeout_end_calc(K_SECONDS(10));
 				gsm.taskBusy = 1;
 				if ((gsm_getSignalQuality_0_to_100() < 20) ||
@@ -656,6 +688,7 @@ void FUNC_NORETURN gsm_task(void *arg1, void *arg2, void *arg3)
 
 			if (gsm60sTimer < k_uptime_ticks()) //  60 seconds timer
 			{
+				printk("Timer 60S");
 				gsm60sTimer = sys_clock_timeout_end_calc(K_SECONDS(60));
 #if (_GSM_MSG_ENABLE == 1)
 				gsm.taskBusy = 1;
@@ -742,6 +775,8 @@ bool gsm_init(void)
 
 	k_sem_init(&gsm.tx.sem, 0, 1);
 	k_mutex_init(&gsmMutex);
+	k_mutex_init(&gsmPower);
+
 
 	uart_irq_rx_disable(gsm.uart_dev);
 	uart_irq_tx_disable(gsm.uart_dev);
