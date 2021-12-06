@@ -11,7 +11,7 @@ osMessageQId gsmDtmfQueueHandle;
 #endif
 Gsm_t gsm = { .uart_dev = NULL };
 
-K_HEAP_DEFINE(gsm_heap, 2048);
+K_HEAP_DEFINE(gsm_heap, 8096);
 
 const char *_GSM_ALWAYS_SEARCH[] = {
 	"\r\n+CLIP:", //  0
@@ -173,24 +173,29 @@ uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
 			   uint16_t sizeOfAnswer, uint8_t items, ...)
 {
 	do {
+		k_sleep(K_MSEC(10));
 	} while (k_mutex_lock(&gsmMutex, K_SECONDS(10)) != 0);
 	va_list tag;
 	va_start(tag, items);
 	for (uint8_t i = 0; i < items; i++) {
 		char *str = va_arg(tag, char *);
-		gsm.at.answerSearch[i] = k_heap_alloc(&gsm_heap, strlen(str), K_MSEC(100));
+		gsm.at.answerSearch[i] = k_heap_alloc(&gsm_heap, strlen(str)+1, K_MSEC(100));
 		if (gsm.at.answerSearch[i] != NULL)
 			strcpy(gsm.at.answerSearch[i], str);
 	}
 	va_end(tag);
+
 	if ((answer != NULL) && (sizeOfAnswer > 0)) {
 		gsm.at.answerSize = sizeOfAnswer;
-		gsm.at.answerString = k_heap_alloc(&gsm_heap, sizeOfAnswer, K_MSEC(100));
+		gsm.at.answerString = k_heap_alloc(&gsm_heap, sizeOfAnswer + 1, K_MSEC(100));
 		memset(gsm.at.answerString, 0, sizeOfAnswer);
 	}
+
 	gsm.at.answerFound = -1;
 	uint64_t startInterval = sys_clock_timeout_end_calc(K_MSEC(waitMs));
+
 	gsm_at_sendString(command);
+
 	while (startInterval > k_uptime_ticks()) {
 		if (gsm.at.answerFound != -1)
 			break;
@@ -201,12 +206,14 @@ uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
 		k_heap_free(&gsm_heap, gsm.at.answerSearch[i]);
 		gsm.at.answerSearch[i] = NULL;
 	}
+
 	if ((answer != NULL) && (sizeOfAnswer > 0)) {
 		if (gsm.at.answerFound >= 0)
 			strncpy(answer, gsm.at.answerString, sizeOfAnswer);
 		k_heap_free(&gsm_heap, gsm.at.answerString);
 		gsm.at.answerString = NULL;
 	}
+
 	k_mutex_unlock(&gsmMutex);
 	return gsm.at.answerFound + 1;
 }
@@ -373,6 +380,7 @@ bool gsm_getServiceProviderName(char *string, uint8_t sizeOfString)
 //#############################################################################################
 uint8_t gsm_getSignalQuality_0_to_100(void)
 {
+	return 12;
 	char str[32];
 	uint8_t p1, p2;
 	if (gsm_at_sendCommand("AT+CSQ\r\n", 1000, str, sizeof(str), 2,
