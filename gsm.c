@@ -15,12 +15,12 @@ Gsm_t gsm = { .uart_dev = NULL };
 K_HEAP_DEFINE(gsm_heap, 8096);
 
 const char *_GSM_ALWAYS_SEARCH[] = {
-	"\r\n+CLIP:", //  0
-	"POWER DOWN\r\n", //  1
-	"\r\n+CMTI:", //  2
-	"\r\nNO CARRIER\r\n", //  3
-	"\r\n+DTMF:", //  4
-	"\r\n+CREG:", //  5
+	"\r\n+CLIP:", // Calling Line Identification
+	"POWER DOWN\r\n",
+	"\r\n+CMTI:", // Input Message
+	"\r\nNO CARRIER\r\n", //
+	"\r\n+DTMF:", // dtmf message
+	"\r\n+CREG:", //
 	"\r\nCLOSED\r\n", //  6
 	"\r\n+CIPRXGET: 1\r\n", //  7
 
@@ -106,6 +106,7 @@ void gsm_at_checkRxBuffer(void)
 				case 1: //  found   "POWER DOWN\r\n"
 					gsm.power = 0;
 					gsm.started = 0;
+					gsm_callback_pwrStatusChange(gsm.power);
 					break;
 				case 2: //  found   "\r\n+CMTI:"
 #if (_GSM_MSG_ENABLE == 1)
@@ -133,6 +134,7 @@ void gsm_at_checkRxBuffer(void)
 						gsm.registred = 1;
 					else
 						gsm.registred = 0;
+					gsm_callback_networkRegister(gsm.registred);
 					break;
 				case 6: //  found   "\r\nCLOSED\r\n"
 #if (_GSM_GPRS_ENABLE == 1)
@@ -186,9 +188,9 @@ uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
 		gsm.at.answerSearch[i] = k_heap_alloc(&gsm_heap, strlen(str)+1, K_MSEC(100));
 		if (gsm.at.answerSearch[i] != NULL) {
 			strcpy(gsm.at.answerSearch[i], str);
-			printk("alloc: item %i\n", strlen(str)+1);
+			//printk("alloc: item %i\n", strlen(str)+1);
 		} else {
-			printk("ERR alloc item %i\n", strlen(str)+1);
+			//printk("ERR alloc item %i\n", strlen(str)+1);
 		}
 	}
 	va_end(tag);
@@ -197,10 +199,10 @@ uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
 		gsm.at.answerSize = sizeOfAnswer;
 		gsm.at.answerString = k_heap_alloc(&gsm_heap, sizeOfAnswer + 1, K_MSEC(100));
 		if (gsm.at.answerString != NULL) {
-			printk("alloc: answer %i\n", sizeOfAnswer + 1);
+			//printk("alloc: answer %i\n", sizeOfAnswer + 1);
 			memset(gsm.at.answerString, 0, sizeOfAnswer);
 		} else {
-			printk("ERR alloc answer %i\n", sizeOfAnswer + 1);
+			//printk("ERR alloc answer %i\n", sizeOfAnswer + 1);
 		}
 	}
 
@@ -218,7 +220,7 @@ uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
 	for (uint8_t i = 0; i < items; i++) {
 		if (gsm.at.answerSearch[i] != NULL) {
 			k_heap_free(&gsm_heap, gsm.at.answerSearch[i]);
-			printk("free: item\n");
+			//printk("free: item\n");
 			gsm.at.answerSearch[i] = NULL;
 		}
 	}
@@ -227,9 +229,9 @@ uint8_t gsm_at_sendCommand(const char *command, uint32_t waitMs, char *answer,
 		if (gsm.at.answerFound >= 0)
 			strncpy(answer, gsm.at.answerString, sizeOfAnswer);
 		k_heap_free(&gsm_heap, gsm.at.answerString);
-		printk("free: answer\n");
+		//printk("free: answer\n");
 		gsm.at.answerString = NULL;
-		printk("Answer \"%s\"\n", answer);
+		//printk("Answer \"%s\"\n", answer);
 	}
 	k_mutex_unlock(&gsmMutex);
 	return gsm.at.answerFound + 1;
@@ -375,7 +377,7 @@ bool gsm_getVersion(char *string, uint8_t sizeOfString)
 	if (sscanf(str1, "\r\nAT+CGMR\r\n %[^\r\n]", str2) != 1)
 		return false;
 	strncpy(string, str2, sizeOfString);
-	printk("Version %s \n", string);
+	//printk("Version %s \n", string);
 	return true;
 }
 //#############################################################################################
@@ -411,13 +413,12 @@ bool gsm_getServiceProviderName(char *string, uint8_t sizeOfString)
 //#############################################################################################
 uint8_t gsm_getSignalQuality_0_to_100(void)
 {
-	return 33;
 	char str[32];
-	uint8_t p1, p2;
+	short int p1, p2;
 	if (gsm_at_sendCommand("AT+CSQ\r\n", 1000, str, sizeof(str), 2,
 			       "\r\n+CSQ:", "\r\nERROR\r\n") != 1)
 		return 0;
-	if (sscanf(str, "\r\n+CSQ: %hhd,%hhd\r\n", &p1, &p2) != 2)
+	if (sscanf(str, "\r\n+CSQ: %hd,%hd\r\n", &p1, &p2) != 2)
 		return 0;
 	if (p1 == 99)
 		gsm.signal = 0;
@@ -466,12 +467,10 @@ bool gsm_ussd(char *command, char *answer, uint16_t sizeOfAnswer, uint8_t waitSe
 bool gsm_waitForStarted(uint8_t waitSecond)
 {
 	uint64_t startInterval = sys_clock_timeout_end_calc(K_SECONDS(waitSecond));
-	//uint32_t startTime = HAL_GetTick();
-	//while (HAL_GetTick() - startTime < (waitSecond * 1000)) {
 	while (startInterval > k_uptime_ticks()) {
-		k_sleep(K_MSEC(100));
 		if (gsm.started == 1)
 			return true;
+		k_sleep(K_MSEC(100));
 	}
 	return false;
 }
@@ -479,19 +478,19 @@ bool gsm_waitForStarted(uint8_t waitSecond)
 bool gsm_waitForRegister(uint8_t waitSecond)
 {
 	uint64_t startInterval = sys_clock_timeout_end_calc(K_SECONDS(waitSecond));
-	//uint32_t startTime = HAL_GetTick();
 	uint8_t idx = 0;
-	//while (HAL_GetTick() - startTime < (waitSecond * 1000)) {
 	while (startInterval > k_uptime_ticks()) {
-		k_sleep(K_MSEC(100));
 		if (gsm.registred == 1)
 			return true;
 		idx++;
 		if (idx % 10 == 0) {
 			if (gsm_at_sendCommand("AT+CREG?\r\n", 1000, NULL, 0, 1,
-					       "\r\n+CREG: 1,1\r\n") == 1)
+					       "\r\n+CREG: 1,1\r\n") == 1) {
 				gsm.registred = 1;
+				gsm_callback_networkRegister(gsm.registred);
+			}
 		}
+		k_sleep(K_MSEC(100));
 	}
 	return false;
 }
@@ -540,26 +539,30 @@ void gsm_init_config(void)
 	gsm_at_sendCommand("AT+CIPHEAD=0\r\n", 1000, NULL, 0, 1, "\r\nOK\r\n");
 	gsm_at_sendCommand("AT+CIPRXGET=1\r\n", 1000, NULL, 0, 1, "\r\nOK\r\n");
 #endif
-	gsm_getVersion(str1, sizeof(str1));
+	//gsm_getVersion(str1, sizeof(str1));
 	k_sleep(K_MSEC(2000));
 	for (uint8_t i = 0; i < 5; i++) {
 		if (gsm_at_sendCommand("AT+CPIN?\r\n", 1000, str1, sizeof(str1), 2,
 				       "\r\n+CPIN:", "\r\nERROR\r\n") == 1) {
 			if (sscanf(str1, "\r\n+CPIN: %[^\r\n]", str2) == 1) {
 				if (strcmp(str2, "READY") == 0) {
+					//printk("SIM ready\n");
 					gsm_callback_simcardReady();
 					break;
 				}
 				if (strcmp(str2, "SIM PIN") == 0) {
+					//printk("SIM pin\n");
 					gsm_callback_simcardPinRequest();
 					break;
 				}
 				if (strcmp(str2, "SIM PUK") == 0) {
+					//printk("SIM puk\n");
 					gsm_callback_simcardPukRequest();
 					break;
 				}
 			}
 		} else {
+			//printk("SIM not insert\n");
 			gsm_callback_simcardNotInserted();
 		}
 		k_sleep(K_MSEC(2000));
@@ -640,7 +643,7 @@ void FUNC_NORETURN gsm_task(void *arg1, void *arg2, void *arg3)
 #endif
 			if (gsm10sTimer < k_uptime_ticks()) //  10 seconds timer
 			{
-				printk("Timer 10S");
+				//printk("Timer 10S");
 				gsm10sTimer = sys_clock_timeout_end_calc(K_SECONDS(10));
 				gsm.taskBusy = 1;
 				if ((gsm_getSignalQuality_0_to_100() < 20) ||
@@ -688,7 +691,7 @@ void FUNC_NORETURN gsm_task(void *arg1, void *arg2, void *arg3)
 
 			if (gsm60sTimer < k_uptime_ticks()) //  60 seconds timer
 			{
-				printk("Timer 60S");
+				//printk("Timer 60S");
 				gsm60sTimer = sys_clock_timeout_end_calc(K_SECONDS(60));
 #if (_GSM_MSG_ENABLE == 1)
 				gsm.taskBusy = 1;

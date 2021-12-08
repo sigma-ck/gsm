@@ -31,6 +31,7 @@ bool gsm_gprs_connect(void)
 	sscanf(str, "\r\n+SAPBR: 1,1,\"%[^\"\r\n]", gsm.gprs.ip);
 	gsm.gprs.connected = true;
 	gsm.gprs.connectedLast = true;
+	gsm_callback_gprsConnected();
 	return true;
 }
 //#############################################################################################

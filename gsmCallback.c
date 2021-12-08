@@ -50,3 +50,11 @@ __weak void gsm_callback_gprsConnected(void)
 __weak void gsm_callback_gprsGotData(uint8_t *data, uint16_t len)
 {
 }
+//#################################################################################
+__weak void gsm_callback_pwrStatusChange(int power)
+{
+}
+//#################################################################################
+__weak void gsm_callback_networkRegister(int status)
+{
+}
